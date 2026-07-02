@@ -1,120 +1,92 @@
-import os
-import subprocess
+import torch
+import torchaudio
 from TTS.api import TTS
 
-
-class XTTSEngine:
-
-    def __init__(self):
-
-        print("🚀 Loading XTTS v2 model...")
-
-        self.tts = TTS(
-            "tts_models/multilingual/multi-dataset/xtts_v2",
-            gpu=True
-        )
-
-        print("✅ XTTS Loaded")
-
-        self.reference_cache = {}
-
-    # -------------------------------------------------
-    # Clean reference audio
-    # -------------------------------------------------
-
-    def prepare_reference(self, input_path, output_path="output/ref_clean.wav"):
-
-        os.makedirs("output", exist_ok=True)
-
-        if input_path in self.reference_cache:
-            return self.reference_cache[input_path]
-
-        command = [
-            "ffmpeg",
-            "-y",
-            "-i", input_path,
-            "-ac", "1",
-            "-ar", "22050",
-            "-af",
-            "highpass=f=70,lowpass=f=12000,"
-            "loudnorm=I=-16:TP=-1.5:LRA=11,"
-            "acompressor=threshold=-18dB:ratio=3:attack=5:release=50",
-
-            output_path
-        ]
-
-        subprocess.run(command, check=True)
-
-        self.reference_cache[input_path] = output_path
-
-        return output_path
-
-    # -------------------------------------------------
-    # Text cleaner (important for natural speech)
-    # -------------------------------------------------
-
-    def clean_text(self, text: str):
-
-        text = text.strip()
-
-        text = text.replace("  ", " ")
-        text = text.replace(",", ", ")
-        text = text.replace(".", ". ")
-        text = text.replace("!", "! ")
-        text = text.replace("?", "? ")
-
-        return text
-
-    # -------------------------------------------------
-    # Generate speech
-    # -------------------------------------------------
-
-    def generate(self, text, speaker, output, language="ar"):
-
-        os.makedirs("output", exist_ok=True)
-
-        speaker_wav = self.prepare_reference(speaker)
-
-        text = self.clean_text(text)
-
-        print("🎙 Generating ...")
-
-        self.tts.tts_to_file(
-            text=text,
-            speaker_wav=speaker_wav,
-            language=language,
-            file_path=output,
-
-            temperature=0.25,        # 🎯 Natural voice
-            length_penalty=1.2,      # 🎯 Better rhythm
-            repetition_penalty=6.0,  # 🎯 Avoid repetition
-            top_k=20,                # 🎯 More stable output
-            top_p=0.7,               # 🎯 Focused sampling
-        )
-
-        print("✅ XTTS done:", output)
+from app.core.base_engine import BaseVoiceEngine
+from app.core.logger import logger
 
 
-        return output
+class XTTSVoiceEngine(BaseVoiceEngine):
+    """
+    XTTS Engine (Coqui TTS)
+    Clean Architecture version
+    """
 
-    # -------------------------------------------------
-    # Post processing (voice enhancement)
-    # -------------------------------------------------
+    def __init__(self, device: str = "cuda"):
+        self.device = device
+        self.model = None
+        self.loaded = False
 
-    def post_process(self, input_path, output_path):
+    # -----------------------------
+    # Load Model
+    # -----------------------------
+    def load_model(self):
+        try:
+            logger.info("Loading XTTS model...")
 
-        command = [
-            "ffmpeg",
-            "-y",
-            "-i", input_path,
-            "-af",
-            "highpass=f=70,"
-            "lowpass=f=12000,"
-            "loudnorm=I=-14:TP=-1.5:LRA=11,"
-            "acompressor=threshold=-18dB:ratio=3:attack=5:release=50,"
-            "dynaudnorm=f=150:g=15",
+            self.model = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
+            self.model.to(self.device)
 
-            output_path
-        ]
+            self.loaded = True
+            logger.info("XTTS model loaded successfully")
 
-        subprocess.run(command, check=True)
+        except Exception as e:
+            logger.error(f"Failed to load XTTS model: {e}")
+            raise
+
+    # -----------------------------
+    # Generate Speech
+    # -----------------------------
+    def generate(
+        self,
+        text: str,
+        speaker_wav: str,
+        output_path: str,
+        language: str = "ar"
+    ) -> str:
+
+        if not self.loaded:
+            self.load_model()
+
+        try:
+            logger.info("Generating speech with XTTS...")
+
+            # تنظيف النص (حل مشكلة text undefined سابقًا)
+            text = str(text).strip()
+
+            if not text:
+                raise ValueError("Text is empty")
+
+            # توليد الصوت
+            self.model.tts_to_file(
+                text=text,
+                speaker_wav=speaker_wav,
+                language=language,
+                file_path=output_path
+            )
+
+            logger.info(f"Audio saved to: {output_path}")
+            return output_path
+
+        except Exception as e:
+            logger.error(f"XTTS generation error: {e}")
+            raise
+
+    # -----------------------------
+    # Unload Model
+    # -----------------------------
+    def unload(self):
+        try:
+            logger.info("Unloading XTTS model...")
+
+            del self.model
+            self.model = None
+            self.loaded = False
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            logger.info("XTTS unloaded successfully")
+
+        except Exception as e:
+            logger.error(f"Unload error: {e}")
