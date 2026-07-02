@@ -1,88 +1,77 @@
-from PySide6.QtCore import QObject, Signal, Slot
+import traceback
+from PyQt6.QtCore import QThread, pyqtSignal
 
-from app.core.xtts_engine import XTTSEngine
-from app.core.text_splitter import TextSplitter
-
-import os
+from app.core.logger import logger
 
 
-class GenerateWorker(QObject):
+class VoiceWorker(QThread):
+    """
+    Worker Thread آمن لتوليد الصوت بدون تجميد الواجهة
+    """
 
-    finished = Signal(str)
-    error = Signal(str)
-    progress = Signal(int)
-    log = Signal(str)
+    # signals
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
 
-    def __init__(self, engine=None):
+    def __init__(self, engine, text, speaker_wav, output_path, language="ar"):
         super().__init__()
 
-        self.engine = engine if engine else XTTSEngine()
-        self.splitter = TextSplitter()
+        self.engine = engine
+        self.text = text
+        self.speaker_wav = speaker_wav
+        self.output_path = output_path
+        self.language = language
 
-        self._cancel = False
+        self._is_running = True
 
-    # -------------------------------------------------
-    # Stop generation
-    # -------------------------------------------------
-
+    # -----------------------------
+    # Stop safely
+    # -----------------------------
     def stop(self):
-        self._cancel = True
+        self._is_running = False
+        self.terminate()  # fallback safety
 
-    # -------------------------------------------------
-    # Main generation slot
-    # -------------------------------------------------
-
-    @Slot(str, str, str)
-    def generate(self, text, speaker, language="ar"):
-
+    # -----------------------------
+    # Main execution
+    # -----------------------------
+    def run(self):
         try:
-            self._cancel = False
+            self.progress.emit("Starting generation...")
 
-            os.makedirs("output", exist_ok=True)
+            # حماية من النص الفارغ
+            if not self.text or not self.text.strip():
+                raise ValueError("Text is empty")
 
-            self.log.emit("📄 Splitting text...")
+            if not self._is_running:
+                return
 
-            parts = self.splitter.split(text)
+            self.progress.emit("Loading engine...")
 
-            total = len(parts)
-            files = []
+            # تحميل الموديل إذا لم يكن محملاً
+            if hasattr(self.engine, "load_model"):
+                self.engine.load_model()
 
-            if total == 0:
-                raise ValueError("No text to generate")
+            if not self._is_running:
+                return
 
-            for i, part in enumerate(parts):
+            self.progress.emit("Generating audio...")
 
-                if self._cancel:
-                    self.log.emit("⛔ Cancelled")
-                    return
+            # توليد الصوت
+            result_path = self.engine.generate(
+                text=self.text,
+                speaker_wav=self.speaker_wav,
+                output_path=self.output_path,
+                language=self.language
+            )
 
-                self.log.emit(f"🎙 Part {i+1}/{total}")
+            if not self._is_running:
+                return
 
-                output_file = f"output/part_{i:03d}.wav"
-
-                self.engine.generate(
-                    text=part,
-                    speaker=speaker,
-                    output=output_file,
-                    language=language
-                )
-
-                files.append(output_file)
-
-                percent = int(((i + 1) / total) * 90)
-                self.progress.emit(percent)
-
-            self.log.emit("🔗 Merging audio...")
-
-            final_output = "output/final.wav"
-
-            self.engine.merge_files(files, final_output)
-
-            self.progress.emit(100)
-            self.log.emit("✅ Done")
-
-            self.finished.emit(final_output)
+            self.progress.emit("Done")
+            self.finished.emit(result_path)
 
         except Exception as e:
+            err = traceback.format_exc()
+            logger.error(err)
             self.error.emit(str(e))
-            print("🔥 LOADED NEW WORKER FILE")
